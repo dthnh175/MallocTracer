@@ -2,18 +2,28 @@
 #include <iostream>
 #include <fstream>
 #include <map>
+#include <ctime>
 
 using namespace std;
 
 map<ADDRINT, bool> MallocMap; // true means address been deallocated, false mean not deallocated.
 ofstream LogFile;
 KNOB<string> LogFileName(KNOB_MODE_WRITEONCE, "pintool", "o", "MallocTracer.log", "Memory trace file name");
+bool malloc_was_called; // to ensure not logging _malloc_base return of _malloc_base entry.
+
+VOID construct_log_filename() {
+	std::time_t t = std::time(nullptr);
+	std::tm tm = *std::localtime(&t);
+	std::stringstream datetime_buffer;
+}
 
 VOID LogBeforeMalloc(ADDRINT size) {
 	LogFile << "[*] malloc(" << dec << size << ")" << endl;
+	malloc_was_called = true;
 }
 
-VOID LogAfterMalloc(ADDRINT addr) {
+VOID LogReturn_malloc_base(ADDRINT addr) {
+	//LogFile << "[*] This is called from LogReturn_malloc_base()" << endl;
 	if (addr == NULL) {
 		cerr << "[-] Error: malloc() returned NULL. Heap full??";
 		return;
@@ -30,8 +40,11 @@ VOID LogAfterMalloc(ADDRINT addr) {
 		}
 	}
 	else {
-		MallocMap.insert(pair<ADDRINT, bool>(addr, false));
-		LogFile << "\t\t= 0x" << hex << addr << endl;
+		if (malloc_was_called) {
+			MallocMap.insert(pair<ADDRINT, bool>(addr, false));
+			LogFile << "\t\t= 0x" << hex << addr << endl;
+			malloc_was_called = false;
+		}
 	}
 }
 
@@ -54,14 +67,24 @@ VOID LogFree(ADDRINT addr) {
 VOID CustomInstrumentation(IMG img, VOID* v) {
 	for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym)) {
 		string undFuncName = PIN_UndecorateSymbolName(SYM_Name(sym), UNDECORATION_NAME_ONLY);
+		//LogFile << "[*] CustomInstrumentation: " << undFuncName << endl;
 		if (undFuncName == "malloc") {
+			LogFile << "[*] CustomInstrumentation: `malloc` is found." << endl;
 			RTN allocRtn = RTN_FindByAddress(IMG_LowAddress(img) + SYM_Value(sym)); // function "malloc" address
 			if (RTN_Valid(allocRtn)) {
 				RTN_Open(allocRtn);
 				RTN_InsertCall(allocRtn, IPOINT_BEFORE, (AFUNPTR)LogBeforeMalloc,
-					IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END); // malloc size
-				RTN_InsertCall(allocRtn, IPOINT_AFTER, (AFUNPTR)LogAfterMalloc,
-					IARG_FUNCRET_EXITPOINT_VALUE, IARG_END); // malloc return address
+					IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END); // to get malloc size
+				RTN_Close(allocRtn);
+			}
+		}
+		else if (undFuncName == "malloc_base") {
+			LogFile << "[*] CustomInstrumentation: `malloc_base` is found." << endl;
+			RTN allocRtn = RTN_FindByAddress(IMG_LowAddress(img) + SYM_Value(sym)); // function "malloc" address
+			if (RTN_Valid(allocRtn)) {
+				RTN_Open(allocRtn);
+				RTN_InsertCall(allocRtn, IPOINT_AFTER, (AFUNPTR)LogReturn_malloc_base,
+					IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
 				RTN_Close(allocRtn);
 			}
 		}
@@ -92,6 +115,9 @@ int main(int argc, char* argv[]) {
 	LogFile.open(LogFileName.Value().c_str());
 	IMG_AddInstrumentFunction(CustomInstrumentation, NULL);
 	PIN_AddFiniFunction(FinalFunc, NULL);
+
+	malloc_was_called = false;
+
 	PIN_StartProgram();
 
 	return 0;
